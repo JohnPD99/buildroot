@@ -3,6 +3,16 @@
 case "$1" in
   start)
         echo -n "Starting maia-httpd: "
+        
+        # Enable AD9361 RX fastlock pincontrol (ignore errors until device is ready)
+        # Try a few times in case IIO enumerates a bit later.
+        for i in 1 2 3 4 5; do
+            /usr/bin/iio_attr -D ad9361-phy adi,rx-fastlock-pincontrol-enable 1 >/dev/null 2>&1 && break
+            sleep 1
+        done
+
+
+
         if [ -f /root/maia-httpd.xz ]; then
             xz -d /root/maia-httpd.xz
         fi
