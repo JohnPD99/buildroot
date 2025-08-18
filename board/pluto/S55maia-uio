@@ -1,0 +1,75 @@
+#!/bin/sh
+# Prepare Maia SDR control UIO and ensure AD9361 IIO exists before maia-httpd.
+
+case "$1" in
+  start)
+        echo -n "Preparing Maia UIO & AD9361: "
+
+        # Load modules (harmless if already present)
+        insmod /lib/modules/uio.ko 2>/dev/null || true
+        insmod /lib/modules/uio_pdrv_genirq.ko 2>/dev/null || true
+        insmod /lib/modules/maia-sdr.ko 2>/dev/null || true
+
+        # Force control block -> uio_pdrv_genirq (older kernels may not OF-match)
+        if [ -d /sys/bus/platform/devices/7c400000.maia-sdr ]; then
+          echo uio_pdrv_genirq > /sys/bus/platform/devices/7c400000.maia-sdr/driver_override 2>/dev/null || true
+          if [ -d /sys/bus/platform/drivers/uio_pdrv_genirq ]; then
+            echo 7c400000.maia-sdr > /sys/bus/platform/drivers/uio_pdrv_genirq/bind 2>/dev/null || true
+          fi
+        fi
+
+        # Wait (≤6s) for a UIO named 'maia-sdr' to appear
+        tries=0; have_uio=
+        while [ $tries -lt 30 ]; do
+          for n in /sys/class/uio/uio*/name; do
+            [ -e "$n" ] || continue
+            if grep -q '^maia-sdr$' "$n"; then have_uio=1; break; fi
+          done
+          [ "$have_uio" = 1 ] && break
+          sleep 0.2; tries=$((tries+1))
+        done
+
+        # If AD9361 missed first probe, try a one-shot re-probe while we wait (≤8s)
+        tries=0; have_ad9361=
+        while [ $tries -lt 40 ]; do
+          for n in /sys/bus/iio/devices/iio:device*/name; do
+            [ -e "$n" ] || continue
+            if grep -q '^ad9361-phy$' "$n"; then have_ad9361=1; break; fi
+          done
+          [ "$have_ad9361" = 1 ] && break
+
+          # Kick re-probe once at ~1s (tries==5) and again at ~3s (tries==15)
+          if [ $tries -eq 5 ] || [ $tries -eq 15 ]; then
+            if [ -d /sys/bus/spi/drivers/ad9361 ] && [ -d /sys/bus/spi/devices/spi0.0 ]; then
+              echo spi0.0 > /sys/bus/spi/drivers/ad9361/unbind 2>/dev/null || true
+              sleep 0.3
+              echo spi0.0 > /sys/bus/spi/drivers/ad9361/bind 2>/dev/null || true
+            fi
+          fi
+
+          sleep 0.2; tries=$((tries+1))
+        done
+
+        if [ "$have_uio" = 1 ]; then
+          echo "OK"
+          exit 0
+        else
+          echo "FAIL (no maia-sdr UIO)"
+          exit 1
+        fi
+        ;;
+  stop)
+        exit 0
+        ;;
+  restart|reload)
+        $0 stop
+        sleep 1
+        $0 start
+        ;;
+  *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit $?
