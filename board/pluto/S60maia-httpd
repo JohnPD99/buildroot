@@ -1,39 +1,86 @@
 #!/bin/sh
+# Start maia-httpd once Maia UIO exists. HTTP only, with logging and port check.
 
 case "$1" in
   start)
         echo -n "Starting maia-httpd: "
-        
-        # Enable AD9361 RX fastlock pincontrol (ignore errors until device is ready)
-        # Try a few times in case IIO enumerates a bit later.
-        for i in 1 2 3 4 5; do
-            /usr/bin/iio_attr -D ad9361-phy adi,rx-fastlock-pincontrol-enable 1 >/dev/null 2>&1 && break
-            sleep 1
+
+        # Ensure log dir exists
+        mkdir -p /var/log
+        LOG=/var/log/maia-httpd.log
+        date +"[%F %T] boot start" >>"$LOG"
+
+        # Wait (≤10s) for a UIO named 'maia-sdr' to appear
+        tries=0; have_uio=
+        while [ $tries -lt 50 ]; do
+          for p in /sys/class/uio/uio*/name; do
+            [ -e "$p" ] || continue
+            if grep -q '^maia-sdr$' "$p"; then have_uio=1; break; fi
+          done
+          [ "$have_uio" = 1 ] && break
+          sleep 0.2; tries=$((tries+1))
+        done
+        if [ "$have_uio" != 1 ]; then
+          echo "FAIL (no maia-sdr UIO)"
+          echo "[WARN] no UIO" >>"$LOG"
+          exit 1
+        fi
+
+        # Best-effort wait (≤8s) for AD9361 IIO
+        tries=0; have_ad9361=
+        while [ $tries -lt 40 ]; do
+          for n in /sys/bus/iio/devices/iio:device*/name; do
+            [ -e "$n" ] || continue
+            if grep -q '^ad9361-phy$' "$n"; then have_ad9361=1; break; fi
+          done
+          [ "$have_ad9361" = 1 ] && break
+          sleep 0.2; tries=$((tries+1))
         done
 
+        # Enable AD9361 RX fastlock pincontrol (best effort)
+        for i in 1 2 3 4 5; do
+          /usr/bin/iio_attr -D ad9361-phy adi,rx-fastlock-pincontrol-enable 1 >/dev/null 2>&1 && break
+          sleep 1
+        done
 
+        # Decompress once if needed
+        [ -f /root/maia-httpd.xz ] && xz -df /root/maia-httpd.xz
 
-        if [ -f /root/maia-httpd.xz ]; then
-            xz -d /root/maia-httpd.xz
-        fi
+        # Clean stale PID and start (HTTP only) with logs
+        rm -f /var/run/maia-httpd.pid
         cd /root
-        start-stop-daemon -S -b -q -m -p /var/run/maia-httpd.pid -x /root/maia-httpd -- --ssl-cert /mnt/jffs2/maia-httpd.crt --ssl-key /mnt/jffs2/maia-httpd.key --ca-cert /mnt/jffs2/maia-sdr-ca.crt
-        cd - > /dev/null
-	[ $? = 0 ] && echo "OK" || echo "FAIL"
-	;;
+        start-stop-daemon -S -b -m -p /var/run/maia-httpd.pid \
+          -x /root/maia-httpd -- --listen 0.0.0.0:8000 >>"$LOG" 2>&1
+        rc=$?
+        cd - >/dev/null
+        [ $rc -ne 0 ] && { echo "FAIL ($rc)"; exit $rc; }
+
+        # Verify port actually bound (≤10s)
+        tries=0
+        while [ $tries -lt 50 ]; do
+          if busybox netstat -ltn 2>/dev/null | grep -q ':8000 '; then
+            echo "OK"
+            exit 0
+          fi
+          sleep 0.2; tries=$((tries+1))
+        done
+        echo "WARN (started, but no :8000 yet)"
+        exit 0
+        ;;
   stop)
         echo -n "Stopping maia-httpd: "
         start-stop-daemon -K -q -p /var/run/maia-httpd.pid 2>/dev/null
         [ $? = 0 ] && echo "OK" || echo "FAIL"
-	;;
+        ;;
   restart|reload)
         $0 stop
         sleep 1
         $0 start
-	;;
+        ;;
   *)
-	echo "Usage: $0 {start|stop|restart}"
-	exit 1
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
 esac
 
 exit $?
